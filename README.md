@@ -1,7 +1,6 @@
-# Automation & QA Developer — Skills Assessment Submission
-
+# Automation & QA Developer 
 **Role:** Automation & QA Developer  
-**Assessment date:** 25–26 May 2026  
+ 
 **App under test:** Conduit (RealWorld demo) — `demo.realworld.io`
 
 ---
