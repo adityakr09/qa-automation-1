@@ -1,0 +1,220 @@
+{
+  "name": "Bonus – Uptime Monitor (Conduit)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 5 }]
+        }
+      },
+      "id": "node-uptime-schedule",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "notes": "Pings the app every 5 minutes. Adjust interval as needed."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Initialise tracking state for this execution\nreturn [{\n  json: {\n    targetUrl: 'https://demo.realworld.io',\n    attempt: 1,\n    maxAttempts: 3,\n    startTime: Date.now()\n  }\n}];"
+      },
+      "id": "node-init",
+      "name": "Init – Set Target & State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300],
+      "notes": "Stores the URL to ping and retry counter. Change targetUrl to match the app under test."
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.targetUrl }}",
+        "options": {
+          "timeout": 10000,
+          "response": { "response": { "fullResponse": true, "responseFormat": "text" } }
+        }
+      },
+      "id": "node-ping",
+      "name": "HTTP Ping – Attempt 1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300],
+      "onError": "continueErrorOutput",
+      "notes": "First ping attempt. Timeout set to 10 s. Continues to error output on failure so retry logic can kick in."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "cond-status",
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 200,
+              "operator": { "type": "number", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-check-200",
+      "name": "IF – Status == 200?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 300],
+      "notes": "Routes to 'OK' path if status is 200; any other status (or timeout) goes to the alert path."
+    },
+    {
+      "parameters": {
+        "jsCode": "const start = $('Init – Set Target & State').first().json.startTime;\nconst elapsed = Date.now() - start;\nconst status = $input.first().json.statusCode;\nconst url = $('Init – Set Target & State').first().json.targetUrl;\n\n// Store last-check summary (in real usage, write to a DB or Google Sheet)\nreturn [{\n  json: {\n    status: 'UP',\n    statusCode: status,\n    responseTimeMs: elapsed,\n    url,\n    checkedAt: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "node-ok",
+      "name": "Log – Site is UP",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 180],
+      "notes": "Records a successful ping. In production, append to a Google Sheet or database for the daily summary."
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Init – Set Target & State').first().json.targetUrl }}",
+        "options": {
+          "timeout": 10000,
+          "response": { "response": { "fullResponse": true, "responseFormat": "text" } }
+        }
+      },
+      "id": "node-retry1",
+      "name": "Retry 1 – Ping Again",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 480],
+      "onError": "continueErrorOutput",
+      "notes": "First retry after failure. Waits implicitly due to sequential execution."
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Init – Set Target & State').first().json.targetUrl }}",
+        "options": {
+          "timeout": 10000,
+          "response": { "response": { "fullResponse": true, "responseFormat": "text" } }
+        }
+      },
+      "id": "node-retry2",
+      "name": "Retry 2 – Final Ping",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 480],
+      "onError": "continueErrorOutput",
+      "notes": "Second and final retry. If this also fails, an alert is fired."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "cond-retry-status",
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 200,
+              "operator": { "type": "number", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "node-check-retry",
+      "name": "IF – Recovered After Retry?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1340, 480],
+      "notes": "If the retry succeeded (200), skip alerting. If still failing, send a Discord alert."
+    },
+    {
+      "parameters": {
+        "jsCode": "const url = $('Init – Set Target & State').first().json.targetUrl;\nconst start = $('Init – Set Target & State').first().json.startTime;\nconst elapsed = Date.now() - start;\n\n// Determine error details\nlet statusCode = 'TIMEOUT / CONNECTION ERROR';\ntry { statusCode = $input.first().json.statusCode || statusCode; } catch(e) {}\n\nconst payload = {\n  username: 'Uptime Monitor',\n  embeds: [{\n    title: '🚨 DOWNTIME ALERT',\n    description: `**Site:** ${url}\\n**Status:** ${statusCode}\\n**After:** ${elapsed} ms (3 attempts)\\n**Time:** ${new Date().toISOString()}\\n\\nPlease investigate immediately.`,\n    color: 16711680\n  }]\n};\n\nreturn [{ json: payload }];"
+      },
+      "id": "node-format-alert",
+      "name": "Format – Downtime Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 600],
+      "notes": "Builds a red Discord embed with the failing URL, status code, and timestamp."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "node-discord-alert",
+      "name": "Discord – Send Downtime Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1780, 600],
+      "credentials": { "httpHeaderAuth": { "id": "discord-webhook-cred", "name": "Discord Webhook" } },
+      "notes": "Fires the alert to Discord. Uses the same webhook credential as Task 2."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Daily Summary (runs at midnight via a separate schedule in production) ──\n// This node is wired as a merge point; in a real deployment it would\n// aggregate the day's check logs from a Google Sheet and post a summary.\n// Included here to demonstrate the pattern.\nconst summary = {\n  username: 'Uptime Monitor',\n  embeds: [{\n    title: '📊 Daily Uptime Summary',\n    description: 'Uptime: 99.7% | Checks: 288 | Failures: 0 | Avg response: 312 ms\\n*(Replace with real aggregation from your data store)*',\n    color: 3066993,\n    footer: { text: new Date().toISOString() }\n  }]\n};\nreturn [{ json: summary }];"
+      },
+      "id": "node-daily-summary",
+      "name": "Daily Summary (Stub)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 660],
+      "notes": "Stub for a daily summary. In production, trigger this at 23:59 and read aggregated stats from a Google Sheet or database."
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": {
+      "main": [[{ "node": "Init – Set Target & State", "type": "main", "index": 0 }]]
+    },
+    "Init – Set Target & State": {
+      "main": [[{ "node": "HTTP Ping – Attempt 1", "type": "main", "index": 0 }]]
+    },
+    "HTTP Ping – Attempt 1": {
+      "main": [
+        [{ "node": "IF – Status == 200?", "type": "main", "index": 0 }],
+        [{ "node": "Retry 1 – Ping Again", "type": "main", "index": 0 }]
+      ]
+    },
+    "IF – Status == 200?": {
+      "main": [
+        [{ "node": "Log – Site is UP", "type": "main", "index": 0 }],
+        [{ "node": "Retry 1 – Ping Again", "type": "main", "index": 0 }]
+      ]
+    },
+    "Retry 1 – Ping Again": {
+      "main": [
+        [{ "node": "Retry 2 – Final Ping", "type": "main", "index": 0 }],
+        [{ "node": "Retry 2 – Final Ping", "type": "main", "index": 0 }]
+      ]
+    },
+    "Retry 2 – Final Ping": {
+      "main": [
+        [{ "node": "IF – Recovered After Retry?", "type": "main", "index": 0 }],
+        [{ "node": "Format – Downtime Alert", "type": "main", "index": 0 }]
+      ]
+    },
+    "IF – Recovered After Retry?": {
+      "main": [
+        [{ "node": "Log – Site is UP", "type": "main", "index": 0 }],
+        [{ "node": "Format – Downtime Alert", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format – Downtime Alert": {
+      "main": [[{ "node": "Discord – Send Downtime Alert", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "executionTimeout": 120
+  },
+  "tags": [{ "name": "uptime" }, { "name": "monitoring" }],
+  "meta": {
+    "instanceId": "bonus-uptime-monitor"
+  }
+}

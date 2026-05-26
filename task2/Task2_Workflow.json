@@ -1,0 +1,237 @@
+{
+  "name": "Task2 – HackerNews Morning Brief",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "hoursInterval": 1 }]
+        }
+      },
+      "id": "node-schedule",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "notes": "Fires every hour. For testing, set to every minute."
+    },
+    {
+      "parameters": {
+        "url": "https://hacker-news.firebaseio.com/v0/topstories.json",
+        "options": { "timeout": 10000 }
+      },
+      "id": "node-hn-top",
+      "name": "HN – Fetch Top Story IDs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300],
+      "onError": "continueErrorOutput",
+      "notes": "Returns an array of up to 500 story IDs ranked by score."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pull the raw JSON array from the HTTP response body\nconst ids = $input.first().json;\n\nif (!Array.isArray(ids) || ids.length === 0) {\n  throw new Error('HN top stories API returned empty or invalid data');\n}\n\n// Take only the first 5 IDs to minimise API calls\nconst top5 = ids.slice(0, 5);\n\n// Emit one item per ID so the next node can parallelise fetches\nreturn top5.map(id => ({ json: { storyId: id } }));"
+      },
+      "id": "node-slice",
+      "name": "Transform – Slice Top 5 IDs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300],
+      "notes": "Filters the 500-item list down to the first 5 IDs and shapes them for the next HTTP loop."
+    },
+    {
+      "parameters": {
+        "url": "=https://hacker-news.firebaseio.com/v0/item/{{ $json.storyId }}.json",
+        "options": { "timeout": 10000 }
+      },
+      "id": "node-hn-story",
+      "name": "HN – Fetch Story Detail",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300],
+      "onError": "continueErrorOutput",
+      "notes": "Second API call – enriches each ID with full story metadata (title, score, URL, author, comment count)."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aggregate all 5 story items into a single digest object\nconst items = $input.all();\n\nconst stories = items\n  .map(i => i.json)\n  .filter(s => s && s.type === 'story' && s.title)\n  .sort((a, b) => (b.score || 0) - (a.score || 0));\n\nif (stories.length === 0) {\n  throw new Error('No valid stories found after enrichment');\n}\n\nreturn [{ json: { stories, fetchedAt: new Date().toISOString() } }];"
+      },
+      "id": "node-aggregate",
+      "name": "Transform – Aggregate & Sort by Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300],
+      "notes": "Merges individual story items, filters to type=story, and sorts descending by score."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "cond-score",
+              "leftValue": "={{ $json.stories[0].score }}",
+              "rightValue": 100,
+              "operator": { "type": "number", "operation": "gte" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-if",
+      "name": "IF – Top Story Score >= 100",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1340, 300],
+      "notes": "Routes to 'Hot digest' branch if the top story has 100+ points; otherwise posts a 'quiet day' digest."
+    },
+    {
+      "parameters": {
+        "jsCode": "const { stories, fetchedAt } = $input.first().json;\n\nconst lines = stories.map((s, i) => {\n  const pts = s.score || 0;\n  const comments = s.descendants || 0;\n  const url = s.url || `https://news.ycombinator.com/item?id=${s.id}`;\n  return `**${i + 1}. ${s.title}**\\n> Score: ${pts} pts | Comments: ${comments} | By: ${s.by}\\n> <${url}>`;\n}).join('\\n\\n');\n\nconst embed = {\n  username: 'HN Morning Brief',\n  embeds: [{\n    title: '🔥 Top HackerNews Stories (Score ≥ 100)',\n    description: lines,\n    color: 16744272,\n    footer: { text: `Fetched at ${fetchedAt}` }\n  }]\n};\n\nreturn [{ json: embed }];"
+      },
+      "id": "node-format-hot",
+      "name": "Format – Hot Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 180],
+      "notes": "Builds a Discord embed payload for high-score days (fire emoji, red accent)."
+    },
+    {
+      "parameters": {
+        "jsCode": "const { stories, fetchedAt } = $input.first().json;\n\nconst lines = stories.map((s, i) => {\n  const pts = s.score || 0;\n  const url = s.url || `https://news.ycombinator.com/item?id=${s.id}`;\n  return `${i + 1}. **${s.title}** (${pts} pts)\\n   <${url}>`;\n}).join('\\n');\n\nconst embed = {\n  username: 'HN Morning Brief',\n  embeds: [{\n    title: '📰 HackerNews Digest – Quiet Day',\n    description: lines,\n    color: 3447003,\n    footer: { text: `Fetched at ${fetchedAt}` }\n  }]\n};\n\nreturn [{ json: embed }];"
+      },
+      "id": "node-format-quiet",
+      "name": "Format – Quiet Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 420],
+      "notes": "Builds a simpler Discord embed for low-score days (newspaper emoji, blue accent)."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "node-discord-hot",
+      "name": "Discord – Send Hot Digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1780, 180],
+      "credentials": { "httpHeaderAuth": { "id": "discord-webhook-cred", "name": "Discord Webhook" } },
+      "onError": "continueErrorOutput",
+      "notes": "Posts the hot digest embed to the team Discord channel via webhook. URL stored in n8n Credentials."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "node-discord-quiet",
+      "name": "Discord – Send Quiet Digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1780, 420],
+      "credentials": { "httpHeaderAuth": { "id": "discord-webhook-cred", "name": "Discord Webhook" } },
+      "onError": "continueErrorOutput",
+      "notes": "Posts the quiet-day digest embed to the same Discord channel."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Collect error information from any failed node\nconst errItem = $input.first();\nconst nodeName = errItem.json.nodeName || 'Unknown node';\nconst errorMsg = errItem.json.message || JSON.stringify(errItem.json);\n\nconst payload = {\n  username: 'HN Brief – Error Monitor',\n  embeds: [{\n    title: '⚠️ Workflow Error',\n    description: `**Node:** ${nodeName}\\n**Error:** ${errorMsg}\\n**Time:** ${new Date().toISOString()}`,\n    color: 16711680\n  }]\n};\n\nreturn [{ json: payload }];"
+      },
+      "id": "node-error-format",
+      "name": "Format – Error Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 520],
+      "notes": "Formats a Discord error embed whenever any upstream HTTP node fails."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "node-discord-error",
+      "name": "Discord – Send Error Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 520],
+      "credentials": { "httpHeaderAuth": { "id": "discord-webhook-cred", "name": "Discord Webhook" } },
+      "notes": "Posts the error alert to Discord. This node intentionally has no error output — if Discord itself is down, the error is logged in n8n execution history."
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [[{ "node": "HN – Fetch Top Story IDs", "type": "main", "index": 0 }]]
+    },
+    "HN – Fetch Top Story IDs": {
+      "main": [
+        [{ "node": "Transform – Slice Top 5 IDs", "type": "main", "index": 0 }],
+        [{ "node": "Format – Error Alert", "type": "main", "index": 0 }]
+      ]
+    },
+    "Transform – Slice Top 5 IDs": {
+      "main": [[{ "node": "HN – Fetch Story Detail", "type": "main", "index": 0 }]]
+    },
+    "HN – Fetch Story Detail": {
+      "main": [
+        [{ "node": "Transform – Aggregate & Sort by Score", "type": "main", "index": 0 }],
+        [{ "node": "Format – Error Alert", "type": "main", "index": 0 }]
+      ]
+    },
+    "Transform – Aggregate & Sort by Score": {
+      "main": [[{ "node": "IF – Top Story Score >= 100", "type": "main", "index": 0 }]]
+    },
+    "IF – Top Story Score >= 100": {
+      "main": [
+        [{ "node": "Format – Hot Digest", "type": "main", "index": 0 }],
+        [{ "node": "Format – Quiet Digest", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format – Hot Digest": {
+      "main": [[{ "node": "Discord – Send Hot Digest", "type": "main", "index": 0 }]]
+    },
+    "Format – Quiet Digest": {
+      "main": [[{ "node": "Discord – Send Quiet Digest", "type": "main", "index": 0 }]]
+    },
+    "Discord – Send Hot Digest": {
+      "main": [
+        [],
+        [{ "node": "Format – Error Alert", "type": "main", "index": 0 }]
+      ]
+    },
+    "Discord – Send Quiet Digest": {
+      "main": [
+        [],
+        [{ "node": "Format – Error Alert", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format – Error Alert": {
+      "main": [[{ "node": "Discord – Send Error Alert", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "executionTimeout": 120
+  },
+  "tags": [{ "name": "morning-brief" }, { "name": "hackernews" }],
+  "meta": {
+    "instanceId": "task2-hn-morning-brief",
+    "templateCredsSetupCompleted": false
+  }
+}
